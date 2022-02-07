@@ -1,0 +1,137 @@
+Description: >-
+  Sets up CloudWatch Dashboard Sharing in the account. A combination of Cognito
+  and IAM is used to restrict access to the shared dashboards.
+Parameters:
+  UserEmail:
+    Description: >-
+      Email address used for creating a Cognito user, that will have permissions
+      to view the shared dashboards. For adding more users later, please use the
+      Cognito console.
+    Type: String
+  DashboardName:
+    Description: >-
+      Name of the CloudWatch Dashboard to share. Note, this parameter is only
+      used for generating a URL to the specified dashboard. In reality, all
+      dashboards in this account will be shared.
+    Type: String
+Resources:
+  AuthUserReadOnlyRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn: IdentityPool
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: 'sts:AssumeRoleWithWebIdentity'
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref IdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': '*authenticated'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess'
+      Policies:
+        - PolicyName: DashboardSharing
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:DescribeTags'
+                Resource: '*'
+              - Effect: Deny
+                Action:
+                  - 'logs:*'
+                Resource: '*'
+      RoleName: !Sub 'AuthUserReadOnlyRole-${AWS::Region}'
+  UserPool:
+    Type: 'AWS::Cognito::UserPool'
+    Properties:
+      UserPoolName: CloudWatchDashboardSharing
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailMessage: >-
+            <p>Someone has shared a CloudWatch Dashboard with you! You can find
+            your temporary credentials for accessing the dashboard below.</p>
+            <p>Your username is <b>{username}</b> and temporary password is
+            <b>{####}</b></p> <p>For improved security, this email does not
+            contain a link to the dashboard. Please contact your administrator
+            to get a link to the shared dashboard.</p>
+          EmailSubject: Your temporary password for CloudWatch Dashboard Sharing
+  UserPoolUser:
+    Type: 'AWS::Cognito::UserPoolUser'
+    DependsOn: UserPool
+    Properties:
+      DesiredDeliveryMediums:
+        - EMAIL
+      UserAttributes:
+        - Name: email
+          Value: !Ref UserEmail
+      Username: !Select
+        - 0
+        - !Split
+          - '@'
+          - !Ref UserEmail
+      UserPoolId: !Ref UserPool
+  UserPoolClient:
+    Type: 'AWS::Cognito::UserPoolClient'
+    DependsOn: UserPool
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: CloudWatchDashboardSharing
+      RefreshTokenValidity: 30
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - openid
+      CallbackURLs:
+        - 'https://cloudwatch.amazonaws.com/dashboard.html'
+      LogoutURLs:
+        - 'https://cloudwatch.amazonaws.com/dashboard.html'
+      SupportedIdentityProviders:
+        - COGNITO
+  UserPoolDomain:
+    Type: 'AWS::Cognito::UserPoolDomain'
+    DependsOn: UserPool
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Sub 'cw-db-${AWS::AccountId}'
+  IdentityPool:
+    Type: 'AWS::Cognito::IdentityPool'
+    DependsOn: UserPoolClient
+    Properties:
+      AllowUnauthenticatedIdentities: false
+      IdentityPoolName: CloudWatchDashboardSharing
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt
+            - UserPool
+            - ProviderName
+  IdentityPoolRoleAttachment:
+    Type: 'AWS::Cognito::IdentityPoolRoleAttachment'
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt
+          - AuthUserReadOnlyRole
+          - Arn
+Outputs:
+  DashboardUrl:
+    Description: >-
+      The URL to the newly shared dashboard. Note, you can access the rest of
+      the dashboards in your account by simply changing the *dashboard*
+      parameter in the URL.
+    Value: !Join
+      - ''
+      - - 'https://cloudwatch.amazonaws.com/dashboard.html?dashboard='
+        - !Sub '${DashboardName}'
+        - '&context='
+        - !Base64
+          'Fn::Sub': >
+            {"R":"${AWS::Region}","D":"${UserPoolDomain}","U":"${UserPool}","C":"${UserPoolClient}","I":"${IdentityPool}"}
